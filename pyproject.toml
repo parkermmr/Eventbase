@@ -1,0 +1,43 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "eventbase"
+version = "1.0.0"
+description = "Couriers that publish and poll events over kafka, s3 and directories"
+readme = "README.md"
+requires-python = ">=3.12"
+authors = [{ name = "Parker" }]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Framework :: AsyncIO",
+    "Topic :: System :: Distributed Computing",
+]
+dependencies = []
+
+[project.optional-dependencies]
+kafka = ["aiokafka>=0.11"]
+s3 = ["aiobotocore>=2.13"]
+all = ["aiokafka>=0.11", "aiobotocore>=2.13"]
+dev = ["pytest>=8", "pytest-cov>=5"]
+
+[project.urls]
+Homepage = "https://github.com/parkermmr/eventbase"
+Issues = "https://github.com/parkermmr/eventbase/issues"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/eventbase"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.coverage.run]
+source = ["eventbase"]
+branch = true
+
+[tool.coverage.report]
+show_missing = true
+skip_covered = true
