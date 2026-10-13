@@ -22,34 +22,34 @@ jobs:
       EVENTBASE_S3: http://localhost:9000
       AWS_ACCESS_KEY_ID: eventbase
       AWS_SECRET_ACCESS_KEY: eventbase-secret
+      AWS_DEFAULT_REGION: us-east-1
     steps:
       - uses: actions/checkout@v4
 
-      - name: Start kafka and minio
-        run: |
-          docker run -d --name kafka -p 9092:9092 apache/kafka:latest
-          docker run -d --name minio -p 9000:9000 \
-            -e MINIO_ROOT_USER="$AWS_ACCESS_KEY_ID" \
-            -e MINIO_ROOT_PASSWORD="$AWS_SECRET_ACCESS_KEY" \
-            minio/minio server /data
+      - name: Start kafka
+        run: docker run -d --name kafka -p 9092:9092 apache/kafka:latest
 
       - uses: astral-sh/setup-uv@v6
         with:
           python-version: ${{ matrix.python }}
+          activate-environment: true
 
       - name: Install
         run: uv pip install -e ".[all,dev]"
 
-      - name: Wait for kafka and minio
+      - name: Start s3
+        run: nohup moto_server -H 127.0.0.1 -p 9000 > moto.log 2>&1 &
+
+      - name: Wait for kafka and s3
         run: |
           for _ in $(seq 60); do
             if docker exec kafka /opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 --list >/dev/null 2>&1 \
-              && curl -sf http://localhost:9000/minio/health/live >/dev/null; then
+              && curl -s -o /dev/null http://localhost:9000/; then
               exit 0
             fi
             sleep 2
           done
-          docker logs kafka; docker logs minio
+          docker logs kafka; cat moto.log
           exit 1
 
       - name: Test

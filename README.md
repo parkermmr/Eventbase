@@ -107,8 +107,11 @@ await runner.run()                        # until runner.stop(), SIGINT or SIGTE
 
 ```
 pytest --cov                             # unit tests with coverage
+
+docker run -d -p 9092:9092 apache/kafka:latest
+moto_server -p 9000 &                    # s3, from the dev extra
 EVENTBASE_KAFKA=localhost:9092 EVENTBASE_S3=http://localhost:9000 \
-AWS_ACCESS_KEY_ID=... AWS_SECRET_ACCESS_KEY=... pytest tests/test_live.py
+AWS_ACCESS_KEY_ID=test AWS_SECRET_ACCESS_KEY=test pytest tests/test_live.py
 ```
 
 [ci-shield]: https://img.shields.io/github/actions/workflow/status/parkermmr/eventbase/ci.yml?branch=main&style=for-the-badge&label=CI
