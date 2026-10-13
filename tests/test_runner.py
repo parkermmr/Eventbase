@@ -102,3 +102,74 @@ def test_concurrency_and_sync_handlers():
     run(runner)
     assert max(peak) == 4
     assert bus.acknowledged == list(range(8))
+
+
+def test_outputs_go_to_sink_before_acknowledging(tmp_path):
+    bus = MemoryBus()
+    courier = Courier(bus)
+    sink = Courier.directory(tmp_path / "out", layout="{tenant}/{key}")
+
+    async def handle(message):
+        if message.id == "0":
+            return message.content + b"!"
+        if message.id == "1":
+            return None
+        runner.stop()
+        return [b"a", (b"b", {"tenant": "other"})]
+
+    async def setup():
+        await courier.connect()
+        for index in range(3):
+            await courier.publish(str(index).encode(), {"tenant": "acme"}, key=str(index))
+
+    runner = Runner(courier, handle, sink=sink)
+    asyncio.run(setup())
+    run(runner)
+    assert bus.acknowledged == [0, 1, 2]
+    assert (tmp_path / "out" / "acme" / "0").read_bytes() == b"0!"
+    assert (tmp_path / "out" / "acme" / "2-0").read_bytes() == b"a"
+    assert (tmp_path / "out" / "other" / "2-1").read_bytes() == b"b"
+    assert not (tmp_path / "out" / "acme" / "1").exists()
+
+
+def test_sink_failure_reconnects_without_spending_retries():
+    class FlakyBus(MemoryBus):
+        async def publish(self, key, value, metadata):
+            if self.failures:
+                self.failures -= 1
+                raise ConnectionError("sink went away")
+            await super().publish(key, value, metadata)
+
+    bus = MemoryBus()
+    courier = Courier(bus)
+    out = FlakyBus()
+    out.failures = 1
+
+    async def handle(message):
+        if not out.failures:
+            runner.stop()
+        return message.content
+
+    runner = Runner(courier, handle, sink=Courier(out), retries=0, pause=0.01)
+    asyncio.run(fill(courier, 1))
+    run(runner)
+    assert bus.acknowledged == [0]
+    assert [record.key for record in out.records] == ["0"]
+    assert out.connects == 2
+    assert runner.attempts == {}
+
+
+def test_bad_output_is_a_handler_failure(tmp_path):
+    bus = MemoryBus()
+    courier = Courier(bus)
+    dead = Courier.directory(tmp_path / "dead")
+
+    async def handle(message):
+        runner.stop()
+        return "not bytes"
+
+    runner = Runner(courier, handle, sink=Courier(MemoryBus()), retries=0, dead=dead)
+    asyncio.run(fill(courier, 1))
+    run(runner)
+    assert bus.acknowledged == [0]
+    assert (tmp_path / "dead" / "0").read_bytes() == b"0"

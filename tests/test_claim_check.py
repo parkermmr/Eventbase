@@ -1,7 +1,9 @@
 import asyncio
 import json
 
-from eventbase import Courier, DirectoryStore, Store
+import pytest
+
+from eventbase import Courier, DirectoryStore, S3Store, Store
 from memory_bus import MemoryBus
 
 
@@ -86,3 +88,12 @@ def test_parallel_is_capped_and_ordered():
     assert contents == [str(index).encode() for index in range(8)]
     assert store.peak == 1
     assert store.order == [str(index) for index in range(8)]
+
+
+def test_s3_layout_names_objects_from_metadata():
+    store = S3Store("events", prefix="inbox/", layout="{tenant}/{key}.{kind}")
+    metadata = {"tenant": "acme", "kind": "png", "key": "ignored"}
+    assert store.name("abc", metadata) == "inbox/acme/abc.png"
+    assert S3Store("events").name("abc", metadata) == "abc"
+    with pytest.raises(ValueError, match="tenant"):
+        store.name("abc", {"kind": "png"})

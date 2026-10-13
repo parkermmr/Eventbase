@@ -63,11 +63,15 @@ class Courier:
         path: str | Path,
         prefixes: Iterable[str] = (),
         parallel: int = 8,
+        layout: str = "{key}",
         **options,
     ) -> "Courier":
-        """A watched directory as both bus and store; options go to DirectoryBus."""
+        """
+        A watched directory as both bus and store, writing files where
+        layout puts them; options go to DirectoryBus.
+        """
         bus = DirectoryBus(path, prefixes, **options)
-        return cls(bus, DirectoryStore(path), parallel)
+        return cls(bus, DirectoryStore(path, layout), parallel)
 
     def parts(self) -> list[Bus | Store]:
         """The bus, then the store when there is one."""

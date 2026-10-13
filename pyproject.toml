@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "eventbase"
-version = "1.0.0"
+version = "1.1.0"
 description = "Couriers that publish and poll events over kafka, s3 and directories"
 readme = "README.md"
 requires-python = ">=3.12"

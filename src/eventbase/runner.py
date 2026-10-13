@@ -13,7 +13,9 @@ from eventbase.models.message import Message
 
 logger = logging.getLogger(__name__)
 
-Handler = Callable[[Message], Awaitable[None] | None]
+Output = bytes | tuple[bytes, dict]
+Result = Output | list[Output] | None
+Handler = Callable[[Message], Awaitable[Result] | Result]
 
 
 class Runner:
@@ -22,6 +24,13 @@ class Runner:
     once handled. Delivery is at least once, so handle should tolerate
     seeing a message twice. A plain function handler runs on a worker
     thread; a coroutine function runs on the loop.
+
+    What handle returns is published to sink, when there is one, before
+    the message is acknowledged: content, content with metadata, a
+    list of either, or None for nothing. Outputs carry the message's
+    metadata with theirs merged over it, and are keyed by the message
+    id, suffixed with their index when handle returns a list, so a
+    redelivered message republishes under the same keys.
 
     Messages are acknowledged in bus order and never past one that
     failed, because a kafka acknowledgement also covers everything
@@ -32,8 +41,8 @@ class Runner:
     concurrency above one handles a batch concurrently, and successes
     behind a failure are handled again on redelivery.
 
-    Failures outside the handler, from the broker, the store or dead,
-    disconnect the courier and reconnect after a doubling backoff that
+    Failures outside the handler, from the broker, the store, sink or
+    dead, disconnect the courier and reconnect after a doubling backoff that
     starts at pause and tops out at ceiling. stop, or SIGINT and
     SIGTERM when run installs signals, finishes the batch in hand and
     returns.
@@ -43,6 +52,7 @@ class Runner:
         self,
         courier: Courier,
         handle: Handler,
+        sink: Courier | None = None,
         limit: int = 50,
         timeout: float = 1.0,
         concurrency: int = 1,
@@ -55,6 +65,7 @@ class Runner:
             raise ValueError("concurrency must be at least 1")
         self.courier = courier
         self.handle = handle
+        self.sink = sink
         self.limit = limit
         self.timeout = timeout
         self.concurrency = concurrency
@@ -97,32 +108,59 @@ class Runner:
             for index, message in enumerate(messages):
                 if self.stopping.is_set():
                     return
-                if not await self.settle(message, await self.attempt(message)):
+                if not await self.settle(message, *await self.attempt(message)):
                     return await self.retry(messages[index:])
             return
-        errors = await asyncio.gather(*(self.attempt(message) for message in messages))
-        for index, (message, error) in enumerate(zip(messages, errors)):
-            if not await self.settle(message, error):
+        results = await asyncio.gather(*(self.attempt(message) for message in messages))
+        for index, (message, result) in enumerate(zip(messages, results)):
+            if not await self.settle(message, *result):
                 return await self.retry(messages[index:])
 
-    async def attempt(self, message: Message) -> Exception | None:
-        """Handle one message; the error it raised, or None."""
+    async def attempt(self, message: Message) -> tuple[list, Exception | None]:
+        """Handle one message; its shaped outputs and the error it raised, or None."""
         async with self.gate:
             try:
                 if inspect.iscoroutinefunction(self.handle):
-                    await self.handle(message)
+                    result = await self.handle(message)
                 else:
-                    await asyncio.to_thread(self.handle, message)
+                    result = await asyncio.to_thread(self.handle, message)
+                return self.shape(message, result), None
             except Exception as error:
-                return error
-        return None
+                return [], error
 
-    async def settle(self, message: Message, error: Exception | None) -> bool:
+    def shape(self, message: Message, result: Result) -> list[tuple[str, bytes, dict]]:
+        """What handle returned as keyed outputs: key, content and metadata."""
+        if result is None:
+            return []
+        many = isinstance(result, list)
+        outputs = []
+        for index, item in enumerate(result if many else [result]):
+            if isinstance(item, bytes):
+                content, metadata = item, {}
+            elif (
+                isinstance(item, tuple)
+                and len(item) == 2
+                and isinstance(item[0], bytes)
+                and isinstance(item[1], dict)
+            ):
+                content, metadata = item
+            else:
+                raise TypeError(
+                    f"handle returned {type(item).__name__}, not bytes or (bytes, dict)"
+                )
+            key = f"{message.id}-{index}" if many else message.id
+            outputs.append((key, content, {**message.metadata, **metadata}))
+        return outputs
+
+    async def settle(self, message: Message, outputs: list, error: Exception | None) -> bool:
         """
-        Acknowledge a handled message, or one given up on after its
-        retries. False means it should be retried.
+        Publish a handled message's outputs and acknowledge it, or
+        acknowledge one given up on after its retries. False means it
+        should be retried.
         """
-        if error is not None:
+        if error is None:
+            await self.deliver(outputs)
+        else:
             failures = self.attempts.get(message.id, 0) + 1
             if failures <= self.retries:
                 self.attempts[message.id] = failures
@@ -135,6 +173,13 @@ class Runner:
         self.attempts.pop(message.id, None)
         await self.courier.acknowledge(message)
         return True
+
+    async def deliver(self, outputs: list[tuple[str, bytes, dict]]) -> None:
+        """Publish outputs to sink in order, or drop them when there is none."""
+        if self.sink is None:
+            return
+        for key, content, metadata in outputs:
+            await self.sink.publish(content, metadata, key=key)
 
     async def bury(self, message: Message, error: Exception, failures: int) -> None:
         """Publish a message given up on to dead, or drop it."""
@@ -151,14 +196,14 @@ class Runner:
         await self.wait(self.pause)
 
     async def open(self) -> None:
-        """Connect the courier and the dead letter courier."""
-        await self.courier.connect()
-        if self.dead is not None:
-            await self.dead.connect()
+        """Connect the courier, the sink and the dead letter courier."""
+        for courier in (self.courier, self.sink, self.dead):
+            if courier is not None:
+                await courier.connect()
 
     async def close(self) -> None:
-        """Disconnect both couriers, logging rather than raising."""
-        for courier in (self.dead, self.courier):
+        """Disconnect every courier, logging rather than raising."""
+        for courier in (self.dead, self.sink, self.courier):
             if courier is None:
                 continue
             try:

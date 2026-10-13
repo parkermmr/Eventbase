@@ -57,34 +57,69 @@ asyncio.run(main())
 - `release(messages)` - hand polled, unacknowledged messages back so the next
   poll redelivers them (kafka seeks back; the directory bus forgets them).
 
-## Runner
+### Store layouts
 
-A run-forever loop over a courier. `handle` may be `async def` or a plain
-function (run on a worker thread).
+`layout` names where a store parks content (an S3 object under `prefix`,
+or a file under the directory), as a format string over the published
+metadata's top level fields plus `{key}` (the message key):
 
 ```python
-from eventbase import Courier, Runner
+store = S3Store("events", prefix="inbox", layout="{tenant}/{date}/{key}")
+await courier.publish(data, {"tenant": "acme", "date": "2026-10-14"})
+# -> s3://events/inbox/acme/2026-10-14/<key>
+
+Courier.directory("/inbox", layout="{tenant}/{key}")          # /inbox/acme/<key>
+Courier.kafka(topic, store=DirectoryStore("/park", layout="{tenant}/{key}"))
+```
+
+Publishing without a field the layout names raises `ValueError`, as does a
+directory layout that fills to a path outside the directory. Keep `{key}`
+in the layout unless the fields alone are unique per message, or content
+overwrites itself. The claim carries the full location, so consumers need
+no layout of their own. With the directory bus, the filled path
+(`acme/<key>`) is the polled message's id.
+
+## Runner
+
+A run-forever loop from one courier into another. `handle` may be
+`async def` or a plain function (run on a worker thread). Input and output
+are independent couriers, so each has its own topic, bucket and layout.
+
+```python
+from eventbase import Courier, Runner, S3Store
 
 async def handle(message):
     ...                                   # raise to retry
+    return result, {"pages": 3}           # published to sink
 
 runner = Runner(
-    Courier.directory("/inbox", prefixes=["invoice_"]),
+    Courier.kafka("raw", store=S3Store("ingest"), group="parser"),
     handle,
+    sink=Courier.kafka("parsed", store=S3Store("curated", layout="{tenant}/{key}")),
     retries=3,                            # then give up on the message
-    dead=Courier.directory("/dead"),      # where given-up messages go
+    dead=Courier.kafka("raw.dead"),       # where given-up messages go
     concurrency=1,                        # >1 handles a batch concurrently
 )
 await runner.run()                        # until runner.stop(), SIGINT or SIGTERM
 ```
 
-- At least once: a message is acknowledged only after `handle` returns, in bus
-  order, never past a failure. A failure releases the rest of the batch and
-  retries after `pause`.
+- `handle` returns `bytes`, `(bytes, metadata)`, a list of either, or `None`
+  for nothing. Outputs are published to `sink` before the input is
+  acknowledged, and dropped when there is no `sink`. Anything else returned
+  counts as a handler failure.
+- Outputs carry the input's metadata with their own merged over it, so
+  fields like `tenant` flow through to the sink's layout. They are keyed by
+  the input's id (`<id>-0`, `<id>-1`, ... for a list), so a redelivered
+  message overwrites its earlier outputs instead of duplicating them in a
+  store. Directory inputs carry their filesystem fields (`size`, `name`,
+  ...) along too; override them if the output should not.
+- At least once: a message is acknowledged only after `handle` returns and
+  its outputs are published, in bus order, never past a failure. A failure
+  releases the rest of the batch and retries after `pause`.
 - After `retries` failures the message is published to `dead` (metadata gains
   `error` and `failures`), or dropped and logged when there is no `dead`, then
   acknowledged.
-- Broker, store or dead-letter errors disconnect and reconnect with a doubling
+- Broker, store, sink or dead-letter errors disconnect and reconnect with a doubling
   backoff from `pause` up to `ceiling`.
 - Stopping finishes the batch in hand before returning.
 

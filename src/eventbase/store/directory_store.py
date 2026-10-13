@@ -9,6 +9,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from uuid import uuid4
 
+from eventbase.layout import place
 from eventbase.store.store import Store
 
 
@@ -51,12 +52,21 @@ class DirectoryStore(Store):
     messages carry what the filesystem knows (key, name, size,
     modified, type) and keeps is False. Claims that resolve outside
     the directory are refused.
+
+    layout names the file, as a format string over the published
+    metadata's top level fields and key, the message key, which wins
+    over a field of the same name: "{tenant}/{key}" files by tenant.
+    Publishing without a field the layout names is refused, as is a
+    layout that fills to a path outside the directory. With a
+    directory bus on the same path, the filled path is the polled
+    message's id.
     """
 
     keeps = False
 
-    def __init__(self, path: str | Path) -> None:
+    def __init__(self, path: str | Path, layout: str = "{key}") -> None:
         self.root = Path(path)
+        self.layout = layout
 
     async def connect(self) -> None:
         """Create the directory if it is missing."""
@@ -78,9 +88,10 @@ class DirectoryStore(Store):
         return location
 
     async def put(self, key: str, content: bytes, metadata: dict) -> dict:
-        """Write the file; metadata cannot be kept here."""
-        await asyncio.to_thread(write, self.locate(key), content)
-        return {"store": "directory", "key": key}
+        """Write the file where layout puts it; metadata cannot be kept here."""
+        name = place(self.layout, key, metadata)
+        await asyncio.to_thread(write, self.locate(name), content)
+        return {"store": "directory", "key": name}
 
     async def get(self, claim: dict) -> tuple[bytes, dict]:
         """Read the file and stat it."""

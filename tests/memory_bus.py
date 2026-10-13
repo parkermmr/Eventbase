@@ -8,7 +8,8 @@ from eventbase import Bus, Record
 class MemoryBus(Bus):
     """
     Records live in a list and the receipt is the index. Like kafka,
-    polling advances a cursor and release seeks it back.
+    polling advances a cursor, release seeks it back, and connecting
+    resumes after the last acknowledged record.
     """
 
     def __init__(self) -> None:
@@ -20,6 +21,7 @@ class MemoryBus(Bus):
 
     async def connect(self) -> None:
         self.connects += 1
+        self.cursor = max(self.acknowledged, default=-1) + 1
 
     async def disconnect(self) -> None:
         pass

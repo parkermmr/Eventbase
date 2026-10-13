@@ -95,3 +95,21 @@ def test_claims_cannot_escape(tmp_path):
         run(store.get({"key": "../outside"}))
     with pytest.raises(ValueError):
         run(store.put("/etc/passwd", b"x", {}))
+
+
+def test_layout_places_files_from_metadata(tmp_path):
+    async def scenario():
+        courier = Courier.directory(tmp_path, layout="{tenant}/{key}")
+        await courier.connect()
+        await courier.publish(b"x", {"tenant": "acme"}, key="abc")
+        with pytest.raises(ValueError, match="tenant"):
+            await courier.publish(b"x", key="def")
+        with pytest.raises(ValueError):
+            await courier.publish(b"x", {"tenant": ".."}, key="../escape")
+        messages = await courier.poll(timeout=0)
+        await courier.disconnect()
+        return messages
+
+    messages = run(scenario())
+    assert [message.id for message in messages] == ["acme/abc"]
+    assert messages[0].content == b"x"
